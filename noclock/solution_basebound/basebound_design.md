@@ -32,3 +32,22 @@ The handshake occurs at the edges of the window as the DMA slides forward by 1 l
    - The Mirror immediately sweeps Buffer 1, pulling any stranded writes for `c` (which happened while the DMA held the lock) and dumps them into Buffer 2 for transmission over the network.
 
 This lock-step edge handoff guarantees that the DMA and Mirror never transmit the same address concurrently, completely eliminating the stale overwrite bug!
+
+## Evolution: Realistic Chip Asynchrony
+To make the FSM model more realistic and closer to physical hardware implementation, we introduced asynchronous interconnect delays:
+1. **CPU Store Buffer**: CPU writes are no longer atomically applied to memory and the Mirror. They queue in a `cpu_store_buffer` before the Memory Controller commits them.
+2. **Decoupled Handshake**: The handshaking between the DMA and Mirror uses asynchronous FIFO queues (`dma_to_mirror_req`, `mirror_to_dma_grant`, `dma_to_mirror_release`). The DMA does not atomically expand `[c, d]`. Instead, it sends a request message, the Mirror updates its bounds and sends a grant message, and the DMA receives the grant before finally updating its own bounds and reading memory.
+
+## A Hidden Danger: The In-Flight Grant Bug
+Decoupling the handshake mathematically introduced a new race condition into our "perfect" lock, exposing a flaw in how **Buffer 1** operates. 
+
+If Buffer 1 acts as an *append-only log* of values (storing exactly what the CPU wrote), the following fatal sequence is possible:
+1. The DMA requests address `Y`.
+2. The Mirror yields `Y` (updating its bounds so new writes go to Buffer 1) and sends the **Grant Message**.
+3. While the Grant Message is *in flight*, the CPU furiously writes to `Y` three times. The memory is updated to value `3`. Buffer 1 logs `(Y, 1)`, `(Y, 2)`, and `(Y, 3)`.
+4. The DMA receives the Grant Message, reads memory (getting the newest value `3`), and transmits it.
+5. The DMA releases `Y`. The Mirror sweeps Buffer 1 and transmits the logged values `1`, `2`, `3`.
+6. The destination receives the DMA's newest value `3`, followed by the Mirror's delayed log values `1` and `2`, causing a stale overwrite!
+
+**The Proposed Fix (Dirty Bitmaps)**
+To solve this, Buffer 1 cannot be an append-only log of values. In hardware, it should be implemented as a **Dirty Bitmap** (or a dictionary that only keeps the latest value). When the CPU writes to a locked address, the Mirror simply flags the address as "dirty." When the DMA releases the lock, the Mirror sweeps the bitmap, sees the dirty flag, and *re-reads* the latest value directly from memory for transmission, discarding any intermediate stale states.
