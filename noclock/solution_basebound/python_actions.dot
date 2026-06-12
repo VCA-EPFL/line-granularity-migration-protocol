@@ -1,0 +1,71 @@
+digraph ActionSystem {
+    rankdir=TB;
+    fontname="Helvetica";
+    node [fontname="Helvetica"];
+    edge [fontname="Helvetica", fontsize=10];
+
+    // State Variables (Data)
+    node [shape=cylinder, style=filled, fillcolor=lightyellow];
+    StoreBuffer [label="cpu_store_buffer"];
+    SourceMem [label="source_mem"];
+    DestMem [label="dest_mem"];
+    MirrorB1 [label="mirror_b1"];
+    MirrorB2 [label="mirror_b2"];
+    DMAInternal [label="dma_internal_buffer"];
+    NetQueue [label="network_queue"];
+    ReqQueue [label="dma_to_mirror_req"];
+    GrantQueue [label="mirror_to_dma_grant"];
+    RelQueue [label="dma_to_mirror_release"];
+    MirrorBounds [label="Mirror Bounds [a, b]", fillcolor=lightgreen];
+    DMABounds [label="DMA Bounds [c, d]", fillcolor=lightblue];
+
+    // Actions (Python Transitions)
+    node [shape=box, style="filled,rounded", fillcolor=lightgrey];
+    T1 [label="1. cpu_executes_store\n[Guard: Always]"];
+    T2 [label="2. mem_controller_commits_store\n[Guard: cpu_store_buffer > 0]"];
+    T3 [label="3. mirror_sends\n[Guard: mirror_b2 > 0]"];
+    T4 [label="4. dma_sends_request\n[Guard: Valid 'd' expansion & not waiting]"];
+    T5 [label="5. mirror_processes_request\n[Guard: dma_to_mirror_req > 0 AND No Pending in B2]"];
+    T6 [label="6. dma_receives_grant\n[Guard: mirror_to_dma_grant > 0]"];
+    T7 [label="7. dma_sends_and_releases\n[Guard: dma_internal_buffer > 0]"];
+    T8 [label="8. mirror_processes_release\n[Guard: dma_to_mirror_release > 0]"];
+    T9 [label="9. network_delivers\n[Guard: network_queue > 0]"];
+
+    // Edges mapping reads/writes
+    T1 -> StoreBuffer [label=" append(addr)"];
+    
+    StoreBuffer -> T2 [label=" pop()"];
+    T2 -> SourceMem [label=" write +1"];
+    T2 -> MirrorB1 [label=" append (if outside [a,b])"];
+    T2 -> MirrorB2 [label=" append (if inside [a,b])"];
+    MirrorBounds -> T2 [style=dashed, label=" checks bounds"];
+
+    MirrorB2 -> T3 [label=" pop()"];
+    T3 -> NetQueue [label=" append (Mirror pkt)"];
+
+    DMABounds -> T4 [style=dashed, label=" reads d"];
+    T4 -> ReqQueue [label=" append (target_d)"];
+
+    ReqQueue -> T5 [label=" pop(target_d)"];
+    MirrorB2 -> T5 [style=dashed, label=" checks for pending target_d"];
+    T5 -> MirrorBounds [label=" updates a (shrinks front)"];
+    T5 -> GrantQueue [label=" append (target_d)"];
+
+    GrantQueue -> T6 [label=" pop(target_d)"];
+    T6 -> DMABounds [label=" updates d (expands front)"];
+    SourceMem -> T6 [label=" reads data at d"];
+    T6 -> DMAInternal [label=" append (chunk)"];
+
+    DMAInternal -> T7 [label=" pop(chunk)"];
+    T7 -> NetQueue [label=" append (DMA pkt)"];
+    T7 -> RelQueue [label=" append (old_c)"];
+    T7 -> DMABounds [label=" updates c (shrinks back)"];
+
+    RelQueue -> T8 [label=" pop(old_c)"];
+    T8 -> MirrorBounds [label=" updates b (expands back)"];
+    MirrorB1 -> T8 [label=" sweeps stranded writes"];
+    T8 -> MirrorB2 [label=" moves writes to B2"];
+
+    NetQueue -> T9 [label=" pop()"];
+    T9 -> DestMem [label=" writes"];
+}
