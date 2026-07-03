@@ -18,8 +18,8 @@ structure State where
     mirrorA : Fin N
     mirrorB : Fin N
     netFifo : List (NetReq × Nat × Nat)
-    dmaC : Int
-    dmaD : Int
+    dmaC : Nat
+    dmaD : Nat
     dmaBuf : List (Nat × Nat)
 
 def State.isInRange (s : State) (addr : Nat) :=
@@ -39,10 +39,10 @@ inductive Transition : State → State → Prop where
         b2' = s.b2 ++ [(addr, val)] ∧ b1' = s.b1
       else
         b1' = s.b1 ++ [(addr, val)] ∧ b2' = s.b2)
-    → s' = {s with 
-        cpuFifo := tl, 
-        b1 := b1', 
-        b2 := b2', 
+    → s' = {s with
+        cpuFifo := tl,
+        b1 := b1',
+        b2 := b2',
         memSrc := fun x => if x == addr then val else s.memSrc x
       }
     → Transition s s'
@@ -56,7 +56,7 @@ inductive Transition : State → State → Prop where
     → s.dmaD < (N : Int) - 1
     → (s.dmaD - s.dmaC + 1) < (DMA_BATCH : Int)
     → d' = s.dmaD + 1
-    → Transition s {s with dmaWait := true, dmaFifo := s.dmaFifo ++ [d'.toNat]}
+    → Transition s {s with dmaWait := true, dmaFifo := s.dmaFifo ++ [d']}
 
 | mirrorProcReq : ∀ s targetD tl,
     s.dmaFifo = targetD :: tl
@@ -66,25 +66,25 @@ inductive Transition : State → State → Prop where
 | receiveGrant : ∀ s targetD tl val,
     s.grantFifo = targetD :: tl
     → val = s.memSrc targetD
-    → Transition s {s with dmaD := (targetD : Int), dmaBuf := s.dmaBuf ++ [(targetD, val)], dmaWait := false}
+    → Transition s {s with dmaD := targetD, dmaBuf := s.dmaBuf ++ [(targetD, val)], dmaWait := false}
 
 | sendAndRelease : ∀ s addr val tl,
     s.dmaBuf = (addr, val) :: tl
-    → addr = s.dmaC.toNat
-    → Transition s {s with 
-        dmaBuf := tl, 
-        netFifo := s.netFifo ++ [(NetReq.DMA, addr, val)], 
-        dmaC := s.dmaC + 1, 
-        releaseFifo := s.releaseFifo ++ [s.dmaC.toNat]
+    → addr = s.dmaC
+    → Transition s {s with
+        dmaBuf := tl,
+        netFifo := s.netFifo ++ [(NetReq.DMA, addr, val)],
+        dmaC := s.dmaC + 1,
+        releaseFifo := s.releaseFifo ++ [s.dmaC]
       }
 
 | procRelease : ∀ s c tl l1 l2,
     s.releaseFifo = c :: tl
     → (l1, l2) = List.partition (fun (a, _) => a == c) s.b1
-    → Transition s {s with 
-        b1 := l2, 
-        b2 := s.b2 ++ l1, 
-        mirrorB := s.mirrorB + 1, 
+    → Transition s {s with
+        b1 := l2,
+        b2 := s.b2 ++ l1,
+        mirrorB := s.mirrorB + 1,
         releaseFifo := tl
       }
 
