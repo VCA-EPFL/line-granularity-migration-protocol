@@ -18,8 +18,8 @@ structure State where
     mirrorA : Fin N
     mirrorB : Fin N
     netFifo : List (NetReq × Nat × Nat)
-    dmaC : Nat
-    dmaD : Nat
+    dmaC : Nat -- Release pointer (address of next chunk to release from DMA to Mirror)
+    dmaD : Nat -- Next address to request (exclusive bound; starts at 0, replacing Python's inclusive -1)
     dmaBuf : List (Nat × Nat)
 
 def State.isInRange (s : State) (addr : Nat) :=
@@ -39,10 +39,10 @@ inductive Transition : State → State → Prop where
         b2' = s.b2 ++ [(addr, val)] ∧ b1' = s.b1
       else
         b1' = s.b1 ++ [(addr, val)] ∧ b2' = s.b2)
-    → s' = {s with
-        cpuFifo := tl,
-        b1 := b1',
-        b2 := b2',
+    → s' = {s with 
+        cpuFifo := tl, 
+        b1 := b1', 
+        b2 := b2', 
         memSrc := fun x => if x == addr then val else s.memSrc x
       }
     → Transition s s'
@@ -53,9 +53,9 @@ inductive Transition : State → State → Prop where
 
 | dmaSendReq : ∀ s d',
     ¬ s.dmaWait
-    → s.dmaD < (N : Int) - 1
-    → (s.dmaD - s.dmaC + 1) < (DMA_BATCH : Int)
-    → d' = s.dmaD + 1
+    → s.dmaD < N
+    → (s.dmaD - s.dmaC) < DMA_BATCH
+    → d' = s.dmaD
     → Transition s {s with dmaWait := true, dmaFifo := s.dmaFifo ++ [d']}
 
 | mirrorProcReq : ∀ s targetD tl,
@@ -66,25 +66,25 @@ inductive Transition : State → State → Prop where
 | receiveGrant : ∀ s targetD tl val,
     s.grantFifo = targetD :: tl
     → val = s.memSrc targetD
-    → Transition s {s with dmaD := targetD, dmaBuf := s.dmaBuf ++ [(targetD, val)], dmaWait := false}
+    → Transition s {s with dmaD := targetD + 1, dmaBuf := s.dmaBuf ++ [(targetD, val)], dmaWait := false}
 
 | sendAndRelease : ∀ s addr val tl,
     s.dmaBuf = (addr, val) :: tl
     → addr = s.dmaC
-    → Transition s {s with
-        dmaBuf := tl,
-        netFifo := s.netFifo ++ [(NetReq.DMA, addr, val)],
-        dmaC := s.dmaC + 1,
+    → Transition s {s with 
+        dmaBuf := tl, 
+        netFifo := s.netFifo ++ [(NetReq.DMA, addr, val)], 
+        dmaC := s.dmaC + 1, 
         releaseFifo := s.releaseFifo ++ [s.dmaC]
       }
 
 | procRelease : ∀ s c tl l1 l2,
     s.releaseFifo = c :: tl
     → (l1, l2) = List.partition (fun (a, _) => a == c) s.b1
-    → Transition s {s with
-        b1 := l2,
-        b2 := s.b2 ++ l1,
-        mirrorB := s.mirrorB + 1,
+    → Transition s {s with 
+        b1 := l2, 
+        b2 := s.b2 ++ l1, 
+        mirrorB := s.mirrorB + 1, 
         releaseFifo := tl
       }
 
@@ -111,7 +111,7 @@ def InitState : State where
     mirrorB     := ⟨N - 1, by decide⟩
     netFifo     := []
     dmaC        := 0
-    dmaD        := -1
+    dmaD        := 0
     dmaBuf      := []
 
 -- 2. Inductive definition of all reachable states from InitState
@@ -119,10 +119,31 @@ inductive Reachable : State → Prop where
 | init : Reachable InitState
 | step : ∀ s s', Reachable s → Transition s s' → Reachable s'
 
--- 3. Safety Invariant: No packet in flight contains a value older than what is already at the destination memory
+-- 3. Piecewise Strong Invariant for Inductive Proof
+def AddressInvariant (s : State) (addr : Nat) : Prop :=
+    if addr < s.dmaC then
+        -- REGION 1: DMA has passed this address
+        (∀ val, (NetReq.Mirror, addr, val) ∈ s.netFifo → val ≥ s.memDest addr) ∧
+        (∀ val, (NetReq.DMA, addr, val) ∈ s.netFifo → val ≥ s.memDest addr) ∧
+        (∀ val, (addr, val) ∈ s.b2 → val ≥ s.memDest addr)
+    else if addr < s.dmaD then
+        -- REGION 2: DMA owns this address (Range locked)
+        (∀ val, (addr, val) ∉ s.b2) ∧
+        (∀ ty val, (ty, addr, val) ∈ s.netFifo → ty = NetReq.DMA)
+    else
+        -- REGION 3: DMA has not reached this address yet
+        (∀ val, (NetReq.Mirror, addr, val) ∈ s.netFifo → val ≥ s.memDest addr) ∧
+        (∀ val, (addr, val) ∈ s.b2 → val ≥ s.memDest addr) ∧
+        (∀ val, (addr, val) ∉ s.dmaBuf) ∧
+        (∀ ty val, (ty, addr, val) ∈ s.netFifo → ty = NetReq.Mirror)
+
+def StrongInvariant (s : State) : Prop :=
+    ∀ addr, addr < N → AddressInvariant s addr
+
+-- 4. Safety Invariant: No packet in flight contains a value older than what is already at the destination memory
 def Safety (s : State) : Prop :=
     ∀ ty addr val, (ty, addr, val) ∈ s.netFifo → val ≥ s.memDest addr
 
--- 4. The Goal Theorem for Formal Proof
+-- 5. The Goal Theorem for Formal Proof
 theorem protocol_safe : ∀ s, Reachable s → Safety s := by
     sorry
