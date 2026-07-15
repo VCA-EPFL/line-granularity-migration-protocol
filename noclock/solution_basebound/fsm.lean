@@ -1,5 +1,7 @@
-abbrev N := 128
-abbrev DMA_BATCH := 8
+opaque N : Nat
+axiom hN : 0 < N
+opaque DMA_BATCH : Nat
+axiom hBatch : 0 < DMA_BATCH
 
 inductive NetReq where
 | Mirror
@@ -8,7 +10,7 @@ inductive NetReq where
 structure State where
     memSrc : Nat → Nat
     memDest : Nat → Nat
-    cpuFifo : List Nat
+    cpuFifo : List (Nat × Nat)
     dmaFifo : List Nat
     grantFifo : List Nat
     releaseFifo : List Nat
@@ -29,12 +31,11 @@ def State.isInRange (s : State) (addr : Nat) :=
         addr ≤ s.mirrorB.val || s.mirrorA.val ≤ addr
 
 inductive Transition : State → State → Prop where
-| cpuExecuteStore : ∀ s s' addr,
-    s' = {s with cpuFifo := s.cpuFifo ++ [addr]} → Transition s s'
+| cpuExecuteStore : ∀ s s' addr val,
+    s' = {s with cpuFifo := s.cpuFifo ++ [(addr, val)]} → Transition s s'
 
-| commitStore : ∀ s s' addr tl b1' b2' val,
-    s.cpuFifo = addr :: tl
-    → val = s.memSrc addr + 1
+| commitStore : ∀ s s' addr val tl b1' b2',
+    s.cpuFifo = (addr, val) :: tl
     → (if s.isInRange addr then
         b2' = s.b2 ++ [(addr, val)] ∧ b1' = s.b1
       else
@@ -61,7 +62,7 @@ inductive Transition : State → State → Prop where
 | mirrorProcReq : ∀ s targetD tl,
     s.dmaFifo = targetD :: tl
     → List.all s.b2 (fun (a, _) => targetD ≠ a)
-    → Transition s {s with dmaFifo := tl, mirrorA := s.mirrorA + 1, grantFifo := s.grantFifo ++ [targetD]}
+    → Transition s {s with dmaFifo := tl, mirrorA := s.mirrorA + ⟨1 % N, Nat.mod_lt 1 hN⟩, grantFifo := s.grantFifo ++ [targetD]}
 
 | receiveGrant : ∀ s targetD tl val,
     s.grantFifo = targetD :: tl
@@ -84,7 +85,7 @@ inductive Transition : State → State → Prop where
     → Transition s {s with 
         b1 := l2, 
         b2 := s.b2 ++ l1, 
-        mirrorB := s.mirrorB + 1, 
+        mirrorB := s.mirrorB + ⟨1 % N, Nat.mod_lt 1 hN⟩, 
         releaseFifo := tl
       }
 
@@ -107,8 +108,8 @@ def InitState : State where
     dmaWait     := false
     b1          := []
     b2          := []
-    mirrorA     := ⟨0, by decide⟩
-    mirrorB     := ⟨N - 1, by decide⟩
+    mirrorA     := ⟨0, hN⟩
+    mirrorB     := ⟨N - 1, Nat.sub_lt hN Nat.zero_lt_one⟩
     netFifo     := []
     dmaC        := 0
     dmaD        := 0
@@ -119,7 +120,7 @@ inductive Reachable : State → Prop where
 | init : Reachable InitState
 | step : ∀ s s', Reachable s → Transition s s' → Reachable s'
 
--- 3. Piecewise Strong Invariant for Inductive Proof
+-- 3. Piecewise Strong Invariant for Inductive Proof (Placeholder for rewrite)
 def AddressInvariant (s : State) (addr : Nat) : Prop :=
     if addr < s.dmaC then
         -- REGION 1: DMA has passed this address
@@ -140,10 +141,11 @@ def AddressInvariant (s : State) (addr : Nat) : Prop :=
 def StrongInvariant (s : State) : Prop :=
     ∀ addr, addr < N → AddressInvariant s addr
 
--- 4. Safety Invariant: No packet in flight contains a value older than what is already at the destination memory
-def Safety (s : State) : Prop :=
-    ∀ ty addr val, (ty, addr, val) ∈ s.netFifo → val ≥ s.memDest addr
+-- 4. Eventual Consistency Invariant: When the system is quiescent, destination memory equals source memory
+def EventualConsistency (s : State) : Prop :=
+    (s.cpuFifo = [] ∧ s.b1 = [] ∧ s.b2 = [] ∧ s.dmaBuf = [] ∧ s.netFifo = [] ∧ s.dmaFifo = [] ∧ s.grantFifo = [] ∧ s.releaseFifo = [])
+    → s.memDest = s.memSrc
 
 -- 5. The Goal Theorem for Formal Proof
-theorem protocol_safe : ∀ s, Reachable s → Safety s := by
+theorem protocol_safe : ∀ s, Reachable s → EventualConsistency s := by
     sorry
