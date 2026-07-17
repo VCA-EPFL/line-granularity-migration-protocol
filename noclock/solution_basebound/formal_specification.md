@@ -1,15 +1,15 @@
 # Formal Specification of the Base-and-Bound Protocol
 
-This document provides a rigorous mathematical specification of the asynchronous Live VM Migration protocol modeled in `fsm_basebound.py`. This formulation is designed to be easily transcribed into a formal verification language such as TLA+, Event-B, or Lean 4.
+This document provides a rigorous mathematical specification of the asynchronous Live VM Migration protocol. This formulation matches the Lean 4 specification in `fsm.lean`, supporting arbitrary write values and parameterized by an arbitrary memory size $N$.
 
 ---
 
 ## 1. Sets and Domains
 
-Let $N = 128$ be the total number of memory addresses, and $BATCH = 8$ be the maximum capacity of the DMA window.
+Let $N$ be an arbitrary positive natural number representing the memory size ($N > 0$), and $BATCH$ be an arbitrary positive natural number representing the maximum capacity of the DMA window ($BATCH > 0$).
 
 *   $A = \{0, 1, \dots, N-1\}$ represents the Memory Address Space.
-*   $V = \mathbb{N}$ represents the set of possible Memory Values (monotonically increasing counters).
+*   $V = \mathbb{N}$ represents the set of possible Memory Values (arbitrary natural numbers, no longer monotonically increasing).
 *   $Q[T]$ denotes the domain of FIFO sequences (queues) containing elements of type $T$.
 *   $SrcType = \{DMA, MIRROR\}$ represents the source of a network packet.
 
@@ -31,7 +31,7 @@ A global state $s \in \Sigma$ is defined by the following state variables:
 *   $mem_{dst} : A \rightarrow V$ (Destination memory mapping)
 
 ### Internal Component Buffers
-*   $buf_{cpu} : Q[A]$ (Stores addresses written by CPU)
+*   $buf_{cpu} : Q[A \times V]$ (CPU Store Buffer: Stores address-value pairs to be committed)
 *   $mir_{b1} : Q[A \times V]$ (Mirror Buffer 1: Stranded writes)
 *   $mir_{b2} : Q[A \times V]$ (Mirror Buffer 2: Ready for transmission)
 *   $dma_{buf} : Q[A \times V]$ (DMA Internal Buffer: Read chunks)
@@ -39,11 +39,11 @@ A global state $s \in \Sigma$ is defined by the following state variables:
 
 ### Bounds & Handshake Variables
 *   $a \in A, b \in A$ (Mirror's physical bounds representing its safe range)
-*   $c \in A, d \in A \cup \{-1\}$ (DMA's active locked window)
+*   $c \in A, d \in A$ (DMA's active locked window boundaries, starting at 0)
 *   $wait_{dma} \in \{True, False\}$ (Prevents DMA from emitting multiple concurrent requests)
-*   $q_{req} : Q[A]$ (Interconnect: DMA requesting $d+1$)
-*   $q_{grant} : Q[A]$ (Interconnect: Mirror granting $d+1$)
-*   $q_{rel} : Q[A]$ (Interconnect: DMA releasing $old\_c$)
+*   $q_{req} : Q[A]$ (Interconnect: DMA requesting next boundary)
+*   $q_{grant} : Q[A]$ (Interconnect: Mirror granting next boundary)
+*   $q_{rel} : Q[A]$ (Interconnect: DMA releasing oldest boundary)
 
 ---
 
@@ -55,7 +55,7 @@ $$ InMir(x, a, b) \triangleq (a \le b \land a \le x \le b) \lor (a > b \land (x 
 
 **Buffer Sweep Operation:**
 Extracts all tuples $(x, v)$ from $mir_{b1}$ where $x = c$, and appends them to $mir_{b2}$. 
-(For brevity in the transitions, we denote the resulting state of the two buffers after this operation as $sweep(mir_{b1}, mir_{b2}, c)$).
+(Denoted as $sweep(mir_{b1}, mir_{b2}, c)$).
 
 ---
 
@@ -66,13 +66,12 @@ Below, $v'$ denotes the value of variable $v$ in the next state $s'$. **Any vari
 
 ### $T_1$: CpuExecutesStore
 *   **Guard**: $True$
-*   **Effect**: $\exists x \in A$, $buf_{cpu}' = buf_{cpu} \oplus x$
+*   **Effect**: $\exists x \in A, v \in V$, $buf_{cpu}' = buf_{cpu} \oplus (x, v)$
 
 ### $T_2$: MemCtrlCommits
 *   **Guard**: $buf_{cpu} \ne \emptyset$
 *   **Effect**: 
-    Let $x = head(buf_{cpu})$
-    Let $val = mem_{src}(x) + 1$
+    Let $(x, val) = head(buf_{cpu})$
     $buf_{cpu}' = tail(buf_{cpu})$
     $mem_{src}' = mem_{src}[x \mapsto val]$
     **If** $InMir(x, a, b)$ **then**:
@@ -88,14 +87,13 @@ Below, $v'$ denotes the value of variable $v$ in the next state $s'$. **Any vari
     $net' = net \oplus (MIRROR, x, v)$
 
 ### $T_4$: DmaSendsRequest
-*   **Guard**: $\neg wait_{dma} \land (d < N - 1) \land ((d - c + 1) < BATCH)$
+*   **Guard**: $\neg wait_{dma} \land (d < N) \land ((d - c) < BATCH)$
 *   **Effect**:
-    $q_{req}' = q_{req} \oplus (d + 1)$
+    $q_{req}' = q_{req} \oplus d$
     $wait_{dma}' = True$
 
 ### $T_5$: MirrorProcessesRequest
 *   **Guard**: $q_{req} \ne \emptyset \land \neg (\exists v \in V : (head(q_{req}), v) \in mir_{b2})$
-    *(The Mirror refuses to fire if Buffer 2 contains pending writes for the requested address).*
 *   **Effect**:
     Let $x = head(q_{req})$
     $q_{req}' = tail(q_{req})$
@@ -107,7 +105,7 @@ Below, $v'$ denotes the value of variable $v$ in the next state $s'$. **Any vari
 *   **Effect**:
     Let $x = head(q_{grant})$
     $q_{grant}' = tail(q_{grant})$
-    $d' = x$
+    $d' = x + 1$
     $dma_{buf}' = dma_{buf} \oplus (x, mem_{src}(x))$
     $wait_{dma}' = False$
 
@@ -128,10 +126,19 @@ Below, $v'$ denotes the value of variable $v$ in the next state $s'$. **Any vari
     $b' = (b + 1) \pmod N$
     $mir_{b1}', mir_{b2}' = sweep(mir_{b1}, mir_{b2}, x)$
 
-### $T_9$: NetworkDelivers (Invariant Monitor)
+### $T_9$: NetworkDelivers
 *   **Guard**: $net \ne \emptyset$
 *   **Effect**:
     Let $(src, x, v) = head(net)$
-    **Assert**: $v \ge mem_{dst}(x)$ *(The Stale Overwrite safety property)*
     $net' = tail(net)$
     $mem_{dst}' = mem_{dst}[x \mapsto v]$
+
+---
+
+## 5. Correctness Property: Eventual Consistency
+
+Unlike simple monotonic systems where safety is checked at every network delivery ($v \ge mem_{dst}$), a system with arbitrary writes can temporarily allow old values to be overwritten by newer ones in flight.
+
+The correctness requirement is **Eventual Consistency** (Quiescent Correctness):
+If all interconnect queues and internal component buffers are empty, the destination memory must be identical to the source memory:
+$$ s.cpuFifo = \emptyset \land s.b1 = \emptyset \dots \implies s.mem_{dst} = s.mem_{src} $$
