@@ -175,6 +175,22 @@ def StrongInvariant (s : State) : Prop :=
     s.dmaC ≤ s.dmaD ∧ s.dmaD ≤ N ∧
     ∀ addr, addr < N → AddressInvariant s addr
 
+-- ==========================================
+-- Formal Verification Proofs
+-- ==========================================
+
+-- 1. Base Case: Initial state satisfies StrongInvariant
+theorem strong_inv_init : StrongInvariant InitState := by
+  unfold StrongInvariant
+  refine ⟨by dsimp [InitState]; omega, ⟨by dsimp [InitState]; omega, ?_⟩⟩
+  intro addr _
+  unfold AddressInvariant
+  have h_not_locked : ¬ (InitState.dmaC ≤ addr ∧ addr < InitState.dmaD) := by
+    dsimp [InitState]
+    omega
+  rw [if_neg h_not_locked]
+  exact ⟨by simp [InitState], by simp [InitState], by dsimp [InitState, PipelineEquivalence, sourceStoreVal, lastCpuFifoVal, lastB2Val, lastNetVal]⟩
+
 -- 4. Eventual Consistency Invariant: When the system is quiescent, destination memory equals source memory
 def EventualConsistency (s : State) : Prop :=
     (s.cpuFifo = [] ∧ s.b1 = [] ∧ s.b2 = [] ∧ s.dmaBuf = [] ∧ s.netFifo = [] ∧ s.dmaFifo = [] ∧ s.grantFifo = [] ∧ s.releaseFifo = [])
