@@ -40,10 +40,10 @@ inductive Transition : State → State → Prop where
         b2' = s.b2 ++ [(addr, val)] ∧ b1' = s.b1
       else
         b1' = s.b1 ++ [(addr, val)] ∧ b2' = s.b2)
-    → s' = {s with 
-        cpuFifo := tl, 
-        b1 := b1', 
-        b2 := b2', 
+    → s' = {s with
+        cpuFifo := tl,
+        b1 := b1',
+        b2 := b2',
         memSrc := fun x => if x == addr then val else s.memSrc x
       }
     → Transition s s'
@@ -72,20 +72,20 @@ inductive Transition : State → State → Prop where
 | sendAndRelease : ∀ s addr val tl,
     s.dmaBuf = (addr, val) :: tl
     → addr = s.dmaC
-    → Transition s {s with 
-        dmaBuf := tl, 
-        netFifo := s.netFifo ++ [(NetReq.DMA, addr, val)], 
-        dmaC := s.dmaC + 1, 
+    → Transition s {s with
+        dmaBuf := tl,
+        netFifo := s.netFifo ++ [(NetReq.DMA, addr, val)],
+        dmaC := s.dmaC + 1,
         releaseFifo := s.releaseFifo ++ [s.dmaC]
       }
 
 | procRelease : ∀ s c tl l1 l2,
     s.releaseFifo = c :: tl
     → (l1, l2) = List.partition (fun (a, _) => a == c) s.b1
-    → Transition s {s with 
-        b1 := l2, 
-        b2 := s.b2 ++ l1, 
-        mirrorB := s.mirrorB + ⟨1 % N, Nat.mod_lt 1 hN⟩, 
+    → Transition s {s with
+        b1 := l2,
+        b2 := s.b2 ++ l1,
+        mirrorB := s.mirrorB + ⟨1 % N, Nat.mod_lt 1 hN⟩,
         releaseFifo := tl
       }
 
@@ -120,25 +120,59 @@ inductive Reachable : State → Prop where
 | init : Reachable InitState
 | step : ∀ s s', Reachable s → Transition s s' → Reachable s'
 
--- 3. Piecewise Strong Invariant for Inductive Proof (Placeholder for rewrite)
+-- ==========================================
+-- Pipeline Helpers for Address Invariant
+-- ==========================================
+
+def lastCpuFifoVal (s : State) (addr : Nat) : Option Nat :=
+  (s.cpuFifo.reverse.find? (fun (a, _) => a == addr)).map Prod.snd
+
+def sourceStoreVal (s : State) (addr : Nat) : Nat :=
+  match lastCpuFifoVal s addr with
+  | some v => v
+  | none   => s.memSrc addr
+
+def lastB1Val (s : State) (addr : Nat) : Option Nat :=
+  (s.b1.reverse.find? (fun (a, _) => a == addr)).map Prod.snd
+
+def lastB2Val (s : State) (addr : Nat) : Option Nat :=
+  (s.b2.reverse.find? (fun (a, _) => a == addr)).map Prod.snd
+
+def lastNetVal (s : State) (addr : Nat) : Option Nat :=
+  (s.netFifo.reverse.find? (fun (_, a, _) => a == addr)).map (fun (_, _, v) => v)
+
+def PipelineEquivalence (s : State) (addr : Nat) : Prop :=
+  let t := sourceStoreVal s addr
+  match lastB2Val s addr with
+  | some vb2 => vb2 = t
+  | none =>
+    match lastNetVal s addr with
+    | some vnet => vnet = t
+    | none => s.memDest addr = t
+
+def LockedPipelineEquivalence (s : State) (addr : Nat) : Prop :=
+  let t := sourceStoreVal s addr
+  match lastB1Val s addr with
+  | some vb1 => vb1 = t
+  | none =>
+    match lastNetVal s addr with
+    | some vnet => vnet = t
+    | none => s.memDest addr = t
+
+-- 3. Piecewise Strong Invariant for Inductive Proof
 def AddressInvariant (s : State) (addr : Nat) : Prop :=
-    if addr < s.dmaC then
-        -- REGION 1: DMA has passed this address
-        (∀ val, (NetReq.Mirror, addr, val) ∈ s.netFifo → val ≥ s.memDest addr) ∧
-        (∀ val, (NetReq.DMA, addr, val) ∈ s.netFifo → val ≥ s.memDest addr) ∧
-        (∀ val, (addr, val) ∈ s.b2 → val ≥ s.memDest addr)
-    else if addr < s.dmaD then
-        -- REGION 2: DMA owns this address (Range locked)
+    if s.dmaC ≤ addr ∧ addr < s.dmaD then
+        -- Region 1: DMA owns this address (Range locked)
         (∀ val, (addr, val) ∉ s.b2) ∧
-        (∀ ty val, (ty, addr, val) ∈ s.netFifo → ty = NetReq.DMA)
+        LockedPipelineEquivalence s addr
     else
-        -- REGION 3: DMA has not reached this address yet
-        (∀ val, (NetReq.Mirror, addr, val) ∈ s.netFifo → val ≥ s.memDest addr) ∧
-        (∀ val, (addr, val) ∈ s.b2 → val ≥ s.memDest addr) ∧
+        -- Region 2: Outside DMA lock (DMA has not reached yet OR DMA has passed)
         (∀ val, (addr, val) ∉ s.dmaBuf) ∧
-        (∀ ty val, (ty, addr, val) ∈ s.netFifo → ty = NetReq.Mirror)
+        (∀ val, (addr, val) ∉ s.b1) ∧
+        PipelineEquivalence s addr
 
 def StrongInvariant (s : State) : Prop :=
+    s.dmaC ≤ s.dmaD ∧ s.dmaD ≤ N ∧
     ∀ addr, addr < N → AddressInvariant s addr
 
 -- 4. Eventual Consistency Invariant: When the system is quiescent, destination memory equals source memory
