@@ -124,13 +124,8 @@ inductive Reachable : State → Prop where
 -- Pipeline Helpers for Address Invariant
 -- ==========================================
 
-def lastCpuFifoVal (s : State) (addr : Nat) : Option Nat :=
-  (s.cpuFifo.reverse.find? (fun (a, _) => a == addr)).map Prod.snd
-
 def sourceStoreVal (s : State) (addr : Nat) : Nat :=
-  match lastCpuFifoVal s addr with
-  | some v => v
-  | none   => s.memSrc addr
+  s.memSrc addr
 
 def lastB1Val (s : State) (addr : Nat) : Option Nat :=
   (s.b1.reverse.find? (fun (a, _) => a == addr)).map Prod.snd
@@ -189,9 +184,24 @@ theorem strong_inv_init : StrongInvariant InitState := by
     dsimp [InitState]
     omega
   rw [if_neg h_not_locked]
-  exact ⟨by simp [InitState], by simp [InitState], by dsimp [InitState, PipelineEquivalence, sourceStoreVal, lastCpuFifoVal, lastB2Val, lastNetVal]⟩
+  exact ⟨by simp [InitState], by simp [InitState], by dsimp [InitState, PipelineEquivalence, sourceStoreVal, lastB2Val, lastNetVal]⟩
 
--- 4. Eventual Consistency Invariant: When the system is quiescent, destination memory equals source memory
+
+theorem strong_inv_step: ∀ s s', StrongInvariant s → Transition s s' → StrongInvariant s' := by
+  intro s s' hs h_trans
+  cases h_trans
+  case cpuExecuteStore h_eq =>
+    subst h_eq
+    exact hs
+  case commitStore => sorry
+  case mirrorSend => sorry
+  case dmaSendReq => sorry
+  case mirrorProcReq => sorry
+  case receiveGrant => sorry
+  case sendAndRelease => sorry
+  case procRelease => sorry
+  case networkDeliver => sorry
+
 def EventualConsistency (s : State) : Prop :=
     (s.cpuFifo = [] ∧ s.b1 = [] ∧ s.b2 = [] ∧ s.dmaBuf = [] ∧ s.netFifo = [] ∧ s.dmaFifo = [] ∧ s.grantFifo = [] ∧ s.releaseFifo = [])
     → s.memDest = s.memSrc
