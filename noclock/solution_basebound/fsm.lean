@@ -11,7 +11,7 @@ structure State where
     memSrc : Nat → Nat
     memDest : Nat → Nat
     cpuFifo : List (Nat × Nat)
-    dmaFifo : List Nat
+    dmaDRequestBuffer : List Nat
     grantFifo : List Nat
     releaseFifo : List Nat
     dmaWait : Bool
@@ -31,8 +31,8 @@ def State.isInRange (s : State) (addr : Nat) :=
         addr ≤ s.mirrorB.val || s.mirrorA.val ≤ addr
 
 inductive Transition : State → State → Prop where
-| cpuExecuteStore : ∀ s s' addr val,
-    s' = {s with cpuFifo := s.cpuFifo ++ [(addr, val)]} → Transition s s'
+| cpuExecuteStore : ∀ s addr val,
+    Transition s {s with cpuFifo := s.cpuFifo ++ [(addr, val)]}
 
 | commitStore : ∀ s s' addr val tl b1' b2',
     s.cpuFifo = (addr, val) :: tl
@@ -57,12 +57,12 @@ inductive Transition : State → State → Prop where
     → s.dmaD < N
     → (s.dmaD - s.dmaC) < DMA_BATCH
     → d' = s.dmaD
-    → Transition s {s with dmaWait := true, dmaFifo := s.dmaFifo ++ [d']}
+    → Transition s {s with dmaWait := true, dmaDRequestBuffer := s.dmaDRequestBuffer ++ [d']}
 
 | mirrorProcReq : ∀ s targetD tl,
-    s.dmaFifo = targetD :: tl
-    → List.all s.b2 (fun (a, _) => targetD ≠ a)
-    → Transition s {s with dmaFifo := tl, mirrorA := s.mirrorA + ⟨1 % N, Nat.mod_lt 1 hN⟩, grantFifo := s.grantFifo ++ [targetD]}
+    s.dmaDRequestBuffer = targetD :: tl
+    → List.all s.b2 (fun (b2addr, _) => targetD ≠ b2addr)
+    → Transition s {s with dmaDRequestBuffer := tl, mirrorA := s.mirrorA + ⟨1 % N, Nat.mod_lt 1 hN⟩, grantFifo := s.grantFifo ++ [targetD]}
 
 | receiveGrant : ∀ s targetD tl val,
     s.grantFifo = targetD :: tl
@@ -102,7 +102,7 @@ def InitState : State where
     memSrc      := fun _ => 0
     memDest     := fun _ => 0
     cpuFifo     := []
-    dmaFifo     := []
+    dmaDRequestBuffer     := []
     grantFifo   := []
     releaseFifo := []
     dmaWait     := false
@@ -190,20 +190,33 @@ theorem strong_inv_init : StrongInvariant InitState := by
 theorem strong_inv_step: ∀ s s', StrongInvariant s → Transition s s' → StrongInvariant s' := by
   intro s s' hs h_trans
   cases h_trans
-  case cpuExecuteStore h_eq =>
-    subst h_eq
+  case cpuExecuteStore addr val =>
     exact hs
   case commitStore => sorry
-  case mirrorSend => sorry
-  case dmaSendReq => sorry
-  case mirrorProcReq => sorry
+  case mirrorSend addr val tl h_b2 =>
+    refine ⟨?_, ?_, ?_⟩
+    ·   simp
+        exact hs.1
+    ·   simp
+        exact hs.2.1
+    ·   intro addr' h_addr_bound
+        unfold AddressInvariant
+        simp
+        by_cases h_cond: s.dmaC ≤ addr ∧ addr < s.dmaD
+        ·   sorry
+        ·   sorry
+
+  case dmaSendReq h_g1 h_g2 h_g3 h_eq =>
+    exact hs
+  case mirrorProcReq targetD tl h_split h_eq=>
+    exact hs
   case receiveGrant => sorry
   case sendAndRelease => sorry
   case procRelease => sorry
   case networkDeliver => sorry
 
 def EventualConsistency (s : State) : Prop :=
-    (s.cpuFifo = [] ∧ s.b1 = [] ∧ s.b2 = [] ∧ s.dmaBuf = [] ∧ s.netFifo = [] ∧ s.dmaFifo = [] ∧ s.grantFifo = [] ∧ s.releaseFifo = [])
+    (s.cpuFifo = [] ∧ s.b1 = [] ∧ s.b2 = [] ∧ s.dmaBuf = [] ∧ s.netFifo = [] ∧ s.dmaDRequestBuffer = [] ∧ s.grantFifo = [] ∧ s.releaseFifo = [])
     → s.memDest = s.memSrc
 
 -- 5. The Goal Theorem for Formal Proof
